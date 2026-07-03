@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description"
+        content="Explore a beautiful 3D virtual church - walk through and experience the sacred space" />
+    <title>3D Church Virtual Tour</title>
+    <link rel="stylesheet" href="/src/style.css" />
+</head>
+
+<body>
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+        <div class="loader">
+            <div class="cross">✝</div>
+            <p>Loading Sacred Space...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Instructions Overlay -->
+    <div id="instructions">
+        <div class="instructions-content">
+            <h1>🏛️ 3D Church Virtual Tour</h1>
+            <p>Click to enter the sacred space</p>
+            <div class="controls-hint">
+                <div class="key-group">
+                    <span class="key">W</span><span class="key">A</span><span class="key">S</span><span
+                        class="key">D</span>
+                    <span class="label">Move</span>
+                </div>
+                <div class="key-group">
+                    <span class="key">🖱️</span>
+                    <span class="label">Look Around</span>
+                </div>
+                <div class="key-group">
+                    <span class="key">ESC</span>
+                    <span class="label">Pause</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- HUD -->
+    <div id="hud" class="hidden">
+        <div class="minimap" id="minimap"></div>
+        <div class="fps-counter" id="fps">FPS: 60</div>
+    </div>
+
+    <!-- Canvas Container -->
+    <div id="canvas-container"></div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+
+</html>

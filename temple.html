@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="探索壯麗的 3D 中式廟宇 - 體驗古建築之美與寧靜空間" />
+    <title>3D 中式廟宇虛擬導覽</title>
+    <link rel="stylesheet" href="/src/temple.css" />
+</head>
+
+<body>
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+        <div class="loader">
+            <div class="temple-icon">🏮</div>
+            <p>正在加載廟宇空間...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Instructions Overlay -->
+    <div id="instructions">
+        <div class="instructions-content">
+            <h1>🏮 3D 中式廟宇虛擬導覽</h1>
+            <p>點擊進入廟宇空間</p>
+            <div class="controls-hint">
+                <div class="key-group">
+                    <span class="key">W</span><span class="key">A</span><span class="key">S</span><span
+                        class="key">D</span>
+                    <span class="label">移動</span>
+                </div>
+                <div class="key-group">
+                    <span class="key">🖱️</span>
+                    <span class="label">環顧</span>
+                </div>
+                <div class="key-group">
+                    <span class="key">1-4</span>
+                    <span class="label">切換時間</span>
+                </div>
+                <div class="key-group">
+                    <span class="key">ESC</span>
+                    <span class="label">釋放滑鼠</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- UI Overlay (always visible/clickable) -->
+    <div class="time-selector" id="time-selector">
+        <button data-time="morning" title="快捷鍵: 1">🌅 早上</button>
+        <button data-time="noon" title="快捷鍵: 2">☀️ 中午</button>
+        <button data-time="afternoon" title="快捷鍵: 3">🌇 下午</button>
+        <button data-time="night" class="active" title="快捷鍵: 4">🌙 晚上</button>
+    </div>
+
+    <!-- HUD (Game info) -->
+    <div id="hud" class="hidden">
+        <div class="minimap" id="minimap"></div>
+        <div class="fps-counter" id="fps">FPS: 60</div>
+        <div class="location-label" id="location">入口處</div>
+    </div>
+
+    <!-- Canvas Container -->
+    <div id="canvas-container"></div>
+
+    <script type="module" src="/src/temple.js"></script>
+</body>
+
+</html>

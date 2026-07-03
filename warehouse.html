@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description"
+        content="3D Warehouse Space Configuration - Visualize storage racks and inventory layout" />
+    <title>3D 倉庫空間配置展示</title>
+    <link rel="stylesheet" href="/src/warehouse.css" />
+</head>
+
+<body>
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+        <div class="loader">
+            <div class="warehouse-icon">🏭</div>
+            <p>載入倉庫空間...</p>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Control Panel -->
+    <div id="control-panel">
+        <h2>📦 倉庫空間配置</h2>
+
+        <!-- Search Section -->
+        <div class="control-section search-section">
+            <h3>🔍 搜尋儲位</h3>
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="儲位/棧板/物料" />
+                <button id="search-btn">搜尋</button>
+            </div>
+            <button id="clear-search" class="clear-btn">清除搜尋</button>
+            <div id="search-result" class="search-result"></div>
+            <div class="search-hint">
+                <small>可搜尋: 儲位(R1-A1-L1)、棧板(P1)、物料名</small>
+            </div>
+        </div>
+
+        <div class="control-section">
+            <h3>視角控制</h3>
+            <div class="btn-group">
+                <button id="view-front">正面</button>
+                <button id="view-top">俯視</button>
+                <button id="view-side">側面</button>
+                <button id="view-iso">等角</button>
+            </div>
+        </div>
+        <div class="control-section">
+            <h3>顯示選項</h3>
+            <label class="toggle">
+                <input type="checkbox" id="toggle-labels" checked />
+                <span>顯示標籤</span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="toggle-boxes" checked />
+                <span>顯示儲位</span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="toggle-grid" checked />
+                <span>顯示地板網格</span>
+            </label>
+        </div>
+        <div class="control-section">
+            <h3>操作說明</h3>
+            <ul class="instructions-list">
+                <li>🖱️ 左鍵拖曳：旋轉視角</li>
+                <li>🖱️ 右鍵拖曳：平移</li>
+                <li>🖱️ 滾輪：縮放</li>
+                <li>點擊儲位：查看詳情</li>
+                <li>🧑 拖曳人員：設導航起點</li>
+            </ul>
+        </div>
+    </div>
+
+
+    <!-- Info Panel (shows when clicking a box) -->
+    <div id="info-panel" class="hidden">
+        <button id="close-info">✕</button>
+        <h3 id="info-title">箱子資訊</h3>
+        <div class="info-content">
+            <div class="info-row">
+                <span class="label">儲位:</span>
+                <span id="info-location">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">層架:</span>
+                <span id="info-level">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">狀態:</span>
+                <span id="info-status">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">貨品:</span>
+                <span id="info-item">-</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Legend -->
+    <div id="legend">
+        <h4>圖例</h4>
+        <div class="legend-item">
+            <span class="color-box occupied"></span>
+            <span>已佔用</span>
+        </div>
+        <div class="legend-item">
+            <span class="color-box available"></span>
+            <span>可用</span>
+        </div>
+        <div class="legend-item">
+            <span class="color-box reserved"></span>
+            <span>預留</span>
+        </div>
+    </div>
+
+    <!-- Stats Display -->
+    <div id="stats">
+        <div class="stat-item">
+            <span class="stat-value" id="total-slots">48</span>
+            <span class="stat-label">總儲位</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="occupied-slots">32</span>
+            <span class="stat-label">已佔用</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-value" id="usage-rate">66%</span>
+            <span class="stat-label">使用率</span>
+        </div>
+    </div>
+
+    <!-- Canvas Container -->
+    <div id="canvas-container"></div>
+
+    <script type="module" src="/src/warehouse.js"></script>
+</body>
+
+</html>
