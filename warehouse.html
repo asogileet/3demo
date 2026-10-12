@@ -36,8 +36,10 @@
             <button id="clear-search" class="clear-btn">清除搜尋</button>
             <div id="search-result" class="search-result"></div>
             <div class="search-hint">
-                <small>可搜尋: 儲位(R1-A1-L1)、棧板(P1)、物料名</small>
+                <small>可搜尋: 儲位(R1-A1-L1)、棧板(P1)、物料名。<br />
+                    搜尋後 AGV 會自動把該貨搬到人偶面前</small>
             </div>
+            <div id="agv-status" class="agv-status">🤖 AGV 待命中</div>
         </div>
 
         <div class="control-section">
@@ -81,6 +83,8 @@
                 <li>🖱️ 滾輪：縮放</li>
                 <li>點擊儲位：查看詳情</li>
                 <li>🧑 拖曳人員：設導航起點</li>
+                <li>🤖 搜尋→AGV 自動搬貨到人偶面前</li>
+                <li>🧱 人偶不可穿越：有貨儲位、落地棧板</li>
             </ul>
         </div>
     </div>
@@ -107,23 +111,6 @@
                 <span class="label">貨品:</span>
                 <span id="info-item">-</span>
             </div>
-        </div>
-    </div>
-
-    <!-- Legend -->
-    <div id="legend">
-        <h4>圖例</h4>
-        <div class="legend-item">
-            <span class="color-box occupied"></span>
-            <span>已佔用</span>
-        </div>
-        <div class="legend-item">
-            <span class="color-box available"></span>
-            <span>可用</span>
-        </div>
-        <div class="legend-item">
-            <span class="color-box reserved"></span>
-            <span>預留</span>
         </div>
     </div>
 

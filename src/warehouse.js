@@ -25,6 +25,22 @@ const CONFIG = {
         frameThickness: 0.12,
         aisleWidth: 5,        // Width between rack rows (walking aisle)
         centerGap: 0.3,       // Gap between the two sides
+        baseHeight: 3.0,      // Raised: empty space under the racks for AGV passage
+        agvClearance: 0.2,    // Clearance between AGV top and lowest shelf level
+    },
+    // Grid cells occupied by obstacles (racks with full pallets or floor pallets)
+    collision: {
+        rackHalfWidth: 0.6,     // Obstacle half-size around a full rack cell
+        palletHalfWidth: 6.0,   // Obstacle half-size around a floor pallet
+    },
+    agv: {
+        bodyLength: 3.6,      // Along Z (drive direction)
+        bodyWidth: 2.6,       // Across X
+        bodyHeight: 1.0,
+        forkLength: 1.6,      // Front fork reach
+        liftHeight: 0.9,      // Fork lift for carrying loads
+        speed: 14,            // AGV travel speed (units/sec)
+        turnSpeed: 2.4,       // Radians per second
     },
     box: {
         width: 1.8,
@@ -63,6 +79,14 @@ let isDraggingWorker = false; // Drag state
 let dragPlane = null;         // Plane for raycasting during drag
 let floorMesh = null;         // Reference to floor for raycasting
 let floorPallets = [];        // Floor pallets storage
+let agv = null;               // AGV vehicle group
+let agvLabel = null;          // AGV status label
+let agvJob = null;            // AGV delivery job plan
+let agvCarried = null;        // Carried load info while moving
+let agvPath = [];             // Remaining waypoints for the AGV
+
+// Obstacle registry (fills after racks/pallets are created)
+const obstacles = [];         // { minX, maxX, minZ, maxZ } AABBs that block AGV & worker
 
 // Keyboard control + follow camera state
 const keys = new Set();                    // Currently held keys (KeyboardEvent.code)
@@ -76,6 +100,8 @@ let bobPhase = 0;                          // Head-bob phase while walking
 let bobAmp = 0;                            // Head-bob amount 0..1 (fades in/out)
 let lastPathRecalc = 0;                    // Last navigation-arrow recompute (ms)
 let clock = null;                          // THREE.Clock for per-frame delta time
+let lastAgvObstacleCheck = 0;              // Debounce for mid-route re-planning
+const checkpoint = { meeting: null, cancelled: false };  // AGV drop-off point set by the worker
 
 // DOM Elements
 const loadingScreen = document.getElementById('loading-screen');
@@ -232,6 +258,9 @@ function init() {
 
     // Create floor pallets near R1
     createFloorPallets();
+
+    // Create the AGV vehicle
+    createAGV();
     updateProgress(100);
 
     // Setup event listeners
@@ -287,6 +316,13 @@ function addLights() {
         pointLight.position.set((i - 1.5) * 12, 14, 0);
         scene.add(pointLight);
     }
+
+    // Top-down cover so the raised third deck is visible from oblique views
+    const topLight = new THREE.DirectionalLight(0xffffff, 0.55);
+    topLight.position.set(-20, 60, -25);
+    topLight.target.position.set(0, 0, 5);
+    scene.add(topLight);
+    scene.add(topLight.target);
 }
 
 /**
@@ -320,107 +356,150 @@ function getRackWorldZ(row) {
 }
 
 /**
+ * Y offset of the bottom-most shelf deck (racks are raised for AGV clearance)
+ */
+function getRackBaseY() {
+    return CONFIG.rack.baseHeight;
+}
+
+/**
+ * Rack world position (3D group origin)
+ */
+function getRackWorldPosition(row) {
+    return new THREE.Vector3(0, getRackBaseY(), getRackWorldZ(row));
+}
+
+/** Raised shelf Y for a level (world space). */
+function getLevelY(level) {
+    return getRackBaseY() + level * CONFIG.rack.slotHeight;
+}
+
+/**
  * Create storage rack structures - 2 sides per level, 3 boxes per side
  */
 function createRacks() {
-    const { rows, boxesPerSide, levels, slotWidth, slotHeight, rackDepth, frameThickness, centerGap } = CONFIG.rack;
+    const { rows, boxesPerSide, levels, slotWidth, slotHeight, rackDepth, frameThickness, centerGap, baseHeight } = CONFIG.rack;
 
     const frameMaterial = new THREE.MeshStandardMaterial({
         color: CONFIG.colors.frame,
         roughness: 0.5,
         metalness: 0.7,
     });
+    const shelfMaterial = new THREE.MeshStandardMaterial({
+        color: 0x334155,
+        roughness: 0.6,
+        metalness: 0.3,
+    });
 
     const rackWidth = boxesPerSide * slotWidth;
     const rackHeight = levels * slotHeight;
     const halfDepth = (rackDepth - centerGap) / 2;
+    const postHeight = baseHeight + rackHeight;
+
+    // Register a whole-rack row obstacle (worker must walk around; AGV also routes around it)
+    for (let row = 0; row < rows; row++) {
+        const rowZmin = getRackWorldZ(row) - halfDepth - centerGap / 2;
+        const rowZmax = getRackWorldZ(row) + halfDepth + centerGap / 2;
+        obstacles.push({
+            minX: -rackWidth / 2 - CONFIG.collision.rackHalfWidth,
+            maxX: rackWidth / 2 + CONFIG.collision.rackHalfWidth,
+            minZ: rowZmin - CONFIG.collision.rackHalfWidth,
+            maxZ: rowZmax + CONFIG.collision.rackHalfWidth,
+        });
+    }
 
     for (let row = 0; row < rows; row++) {
-        const rowZ = getRackWorldZ(row);
+        const rackGroup = new THREE.Group();
+        rackGroup.name = 'rack-group';
+        rackGroup.position.set(0, baseHeight, getRackWorldZ(row));
+        scene.add(rackGroup);
 
-        // Create vertical posts (uprights) at corners
+        const localZmin = -(halfDepth + centerGap / 2);
+        const localZmax = halfDepth + centerGap / 2;
+
+        // legs x positions
+        const allPosts = [];
         for (let c = 0; c <= boxesPerSide; c++) {
-            const postX = c * slotWidth - rackWidth / 2;
-
-            // Front posts (Side A)
-            const postGeometryA = new THREE.BoxGeometry(frameThickness, rackHeight, frameThickness);
-            const postA = new THREE.Mesh(postGeometryA, frameMaterial);
-            postA.position.set(postX, rackHeight / 2, rowZ - halfDepth / 2 - centerGap / 2);
-            postA.castShadow = true;
-            scene.add(postA);
-
-            // Back posts (Side B)
-            const postB = new THREE.Mesh(postGeometryA, frameMaterial);
-            postB.position.set(postX, rackHeight / 2, rowZ + halfDepth / 2 + centerGap / 2);
-            postB.castShadow = true;
-            scene.add(postB);
+            allPosts.push(c * slotWidth - rackWidth / 2);
         }
 
-        // Create horizontal beams and shelves for each level
+        // legs z positions: one near each end of each side
+        const legZs = [
+            localZmin + frameThickness,      // A outer
+            localZmin + halfDepth - frameThickness,    // A inner
+            localZmax - halfDepth + frameThickness,    // B inner
+            localZmax - frameThickness,      // B outer
+        ];
+
+        // Legs (tall vertical supports, from floor to top of rack)
+        allPosts.forEach((postX) => {
+            legZs.forEach((legZ) => {
+                const legGeometry = new THREE.BoxGeometry(frameThickness, postHeight, frameThickness);
+                const leg = new THREE.Mesh(legGeometry, frameMaterial);
+                leg.position.set(postX, postHeight / 2, legZ);
+                leg.castShadow = true;
+                rackGroup.add(leg);
+            });
+        });
+
+        // Cross beams under the two lowest levels to reinforce the undercarriage
+        [baseHeight, baseHeight + slotHeight].forEach((levelY) => {
+            allPosts.forEach((postX) => {
+                const crossGeom = new THREE.BoxGeometry(frameThickness, frameThickness, rackDepth);
+                const cross = new THREE.Mesh(crossGeom, frameMaterial);
+                cross.position.set(postX, levelY - frameThickness / 2, 0);
+                cross.castShadow = true;
+                rackGroup.add(cross);
+            });
+        });
+
+        // Shelf decks at each level (both sides)
         for (let level = 0; level <= levels; level++) {
-            const beamY = level * slotHeight;
-
-            // Side A beams (front and back of side A)
-            for (let fb = -1; fb <= 1; fb += 2) {
-                const beamGeometry = new THREE.BoxGeometry(rackWidth, frameThickness, frameThickness);
-                const beam = new THREE.Mesh(beamGeometry, frameMaterial);
-                const zOffset = rowZ - halfDepth / 2 - centerGap / 2 + fb * (halfDepth / 2 - frameThickness / 2);
-                beam.position.set(0, beamY, zOffset);
-                beam.castShadow = true;
-                scene.add(beam);
-            }
-
-            // Side B beams (front and back of side B)
-            for (let fb = -1; fb <= 1; fb += 2) {
-                const beamGeometry = new THREE.BoxGeometry(rackWidth, frameThickness, frameThickness);
-                const beam = new THREE.Mesh(beamGeometry, frameMaterial);
-                const zOffset = rowZ + halfDepth / 2 + centerGap / 2 + fb * (halfDepth / 2 - frameThickness / 2);
-                beam.position.set(0, beamY, zOffset);
-                beam.castShadow = true;
-                scene.add(beam);
-            }
-
-            // Cross beams connecting posts
-            for (let c = 0; c <= boxesPerSide; c++) {
-                const crossX = c * slotWidth - rackWidth / 2;
-
-                // Side A cross beams
-                const crossGeomA = new THREE.BoxGeometry(frameThickness, frameThickness, halfDepth);
-                const crossA = new THREE.Mesh(crossGeomA, frameMaterial);
-                crossA.position.set(crossX, beamY, rowZ - halfDepth / 2 - centerGap / 2);
-                crossA.castShadow = true;
-                scene.add(crossA);
-
-                // Side B cross beams
-                const crossB = new THREE.Mesh(crossGeomA, frameMaterial);
-                crossB.position.set(crossX, beamY, rowZ + halfDepth / 2 + centerGap / 2);
-                crossB.castShadow = true;
-                scene.add(crossB);
-            }
-
-            // Add shelf surfaces
-            if (level < levels) {
-                const shelfGeometry = new THREE.BoxGeometry(rackWidth - frameThickness, frameThickness / 2, halfDepth - frameThickness);
-                const shelfMaterial = new THREE.MeshStandardMaterial({
-                    color: 0x334155,
-                    roughness: 0.6,
-                    metalness: 0.3,
+            const beamY = baseHeight + level * slotHeight;
+            ['A', 'B'].forEach((side) => {
+                const sideZ = side === 'A' ? localZmin + halfDepth / 2 : localZmax - halfDepth / 2;
+                [localZmin + frameThickness / 2, localZmax - frameThickness / 2].forEach((edgeZ) => {
+                    const beamGeometry = new THREE.BoxGeometry(rackWidth, frameThickness, frameThickness);
+                    const beam = new THREE.Mesh(beamGeometry, frameMaterial);
+                    beam.position.set(0, beamY, edgeZ);
+                    beam.castShadow = true;
+                    rackGroup.add(beam);
                 });
 
-                // Side A shelf
-                const shelfA = new THREE.Mesh(shelfGeometry, shelfMaterial);
-                shelfA.position.set(0, level * slotHeight + frameThickness / 2, rowZ - halfDepth / 2 - centerGap / 2);
-                shelfA.receiveShadow = true;
-                scene.add(shelfA);
+                if (level < levels) {
+                    const shelfGeometry = new THREE.BoxGeometry(rackWidth - frameThickness, frameThickness / 2, halfDepth - frameThickness);
+                    const shelf = new THREE.Mesh(shelfGeometry, shelfMaterial);
+                    shelf.position.set(0, beamY + frameThickness, sideZ);
+                    shelf.receiveShadow = true;
+                    rackGroup.add(shelf);
+                }
+            });
 
-                // Side B shelf
-                const shelfB = new THREE.Mesh(shelfGeometry, shelfMaterial);
-                shelfB.position.set(0, level * slotHeight + frameThickness / 2, rowZ + halfDepth / 2 + centerGap / 2);
-                shelfB.receiveShadow = true;
-                scene.add(shelfB);
-            }
+            // Longitudinal cross beams to hold the two sides together
+            [localZmin, localZmax].forEach((edgeZ) => {
+                const longGeom = new THREE.BoxGeometry(roomWidth(rackWidth), frameThickness, frameThickness);
+                const longBeam = new THREE.Mesh(longGeom, frameMaterial);
+                longBeam.position.set(0, beamY, edgeZ);
+                rackGroup.add(longBeam);
+            });
         }
     }
+}
+
+/**
+ * Small helper used to shrink the longitudinal beams slightly
+ */
+function roomWidth(w) {
+    return w - 0.1;
+}
+
+/**
+ * Mesh representing a full/occupied slot box positioned on a shelf
+ */
+function createOccupiedBoxMesh(slot, boxMesh) {
+    const pos = getBoxWorldPosition(slot);
+    boxMesh.position.copy(pos);
+    boxMesh.geometry = new THREE.BoxGeometry(CONFIG.box.width, CONFIG.box.height, CONFIG.box.depth);
 }
 
 /**
@@ -434,7 +513,7 @@ function getBoxWorldPosition(slot) {
     const halfDepth = (rackDepth - centerGap) / 2;
 
     const x = (slot.position - (boxesPerSide - 1) / 2) * slotWidth;
-    const y = slot.level * slotHeight + height / 2 + frameThickness;
+    const y = getRackBaseY() + slot.level * slotHeight + height / 2 + frameThickness;
 
     // Side A (0) is at negative Z, Side B (1) is at positive Z
     const rowZ = getRackWorldZ(slot.row);
@@ -577,7 +656,7 @@ function createLabels() {
         const labelMaterial = new THREE.SpriteMaterial({ map: texture });
         const label = new THREE.Sprite(labelMaterial);
 
-        label.position.set(rackWidth / 2 + 3, 9, rowZ);
+        label.position.set(rackWidth / 2 + 3, 9 + getRackBaseY(), rowZ);
         label.scale.set(5, 1.6, 1);
 
         labels.push(label);
@@ -586,14 +665,14 @@ function createLabels() {
         // Side A label (left/front)
         const sideALabel = createSideLabel('A側', rowZ - halfDepth - centerGap / 2 - 1.5);
         sideALabel.position.x = -rackWidth / 2 - 2;
-        sideALabel.position.y = 5;
+        sideALabel.position.y = 5 + getRackBaseY();
         labels.push(sideALabel);
         scene.add(sideALabel);
 
         // Side B label (right/back)
         const sideBLabel = createSideLabel('B側', rowZ + halfDepth + centerGap / 2 + 1.5);
         sideBLabel.position.x = -rackWidth / 2 - 2;
-        sideBLabel.position.y = 5;
+        sideBLabel.position.y = 5 + getRackBaseY();
         labels.push(sideBLabel);
         scene.add(sideBLabel);
     }
@@ -737,6 +816,151 @@ function createWorkerMarker() {
 }
 
 /**
+ * Create AGV (automated guided vehicle) mesh and default parked pose.
+ */
+function createAGV() {
+    const { bodyLength, bodyWidth, bodyHeight, forkLength } = CONFIG.agv;
+
+    agv = new THREE.Group();
+    agv.name = 'agv';
+    agv.position.set(-rackWidthHalf() - 10, 0, getRackWorldZ(3) + 14);
+
+    const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.45, metalness: 0.35 });
+    const darkMaterial = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.6, metalness: 0.3 });
+
+    // Body
+    const body = new THREE.Mesh(new THREE.BoxGeometry(bodyWidth, bodyHeight, bodyLength), bodyMaterial);
+    body.position.y = 0.3 + bodyHeight / 2;
+    body.castShadow = true;
+    agv.add(body);
+
+    // Driverless cab (low bump)
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(bodyWidth * 0.8, 0.7, bodyLength * 0.35), darkMaterial);
+    cabin.position.set(0, 0.3 + bodyHeight + 0.35, -bodyLength / 4);
+    cabin.castShadow = true;
+    agv.add(cabin);
+
+    // Rear counterweight
+    const counterweight = new THREE.Mesh(new THREE.BoxGeometry(bodyWidth * 0.95, bodyHeight * 0.85, bodyLength * 0.2), darkMaterial);
+    counterweight.position.set(0, 0.3 + bodyHeight * 0.9, -bodyLength / 2 - 0.1);
+    counterweight.castShadow = true;
+    agv.add(counterweight);
+
+    // Wheels: 4 small cylinders
+    const wheelGeometry = new THREE.CylinderGeometry(0.45, 0.45, 0.4, 20);
+    wheelGeometry.rotateZ(Math.PI / 2);
+    [-bodyWidth / 2 + 0.3, bodyWidth / 2 - 0.3].forEach((wx) => {
+        [-bodyLength / 3, bodyLength / 3].forEach((wz) => {
+            const wheel = new THREE.Mesh(wheelGeometry, darkMaterial);
+            wheel.position.set(wx, 0.45, wz);
+            wheel.castShadow = true;
+            agv.add(wheel);
+        });
+    });
+
+    // Warning beacon
+    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), new THREE.MeshStandardMaterial({
+        color: 0xffcc00,
+        emissive: 0xffaa00,
+        emissiveIntensity: 0.6,
+    }));
+    beacon.position.set(0, 0.3 + bodyHeight + 0.8, -bodyLength / 4);
+    beacon.name = 'agv-beacon';
+    agv.add(beacon);
+
+    // Fork frame (front mast) - lifts and lowers like a real fork AGV
+    const mast = new THREE.Group();
+    mast.name = 'agv-mast';
+    agv.add(mast);
+    const mastColumn = new THREE.Mesh(
+        new THREE.BoxGeometry(bodyWidth * 0.9, 3.4, 0.3),
+        darkMaterial
+    );
+    mastColumn.position.set(0, 0.3 + bodyHeight / 2 + 1.7, bodyLength / 2);
+    mastColumn.castShadow = true;
+    mast.add(mastColumn);
+
+    const forkBeam = new THREE.Mesh(
+        new THREE.BoxGeometry(bodyWidth * 0.95, 0.25, 0.4),
+        bodyMaterial
+    );
+    forkBeam.position.set(0, CONFIG.agv.liftHeight, bodyLength / 2);
+    forkBeam.castShadow = true;
+    forkBeam.name = 'agv-fork';
+    mast.add(forkBeam);
+
+    [-bodyWidth * 0.4, bodyWidth * 0.4].forEach((fx) => {
+        const tine = new THREE.Mesh(
+            new THREE.BoxGeometry(0.18, 0.15, forkLength + 0.5),
+            darkMaterial
+        );
+        tine.position.set(fx, CONFIG.agv.liftHeight - 0.1, bodyLength / 2 + forkLength / 2);
+        tine.castShadow = true;
+        mast.add(tine);
+    });
+
+    scene.add(agv);
+
+    // Create AGV label
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 80;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(249, 115, 22, 0.95)';
+    ctx.roundRect(0, 0, 256, 80, 12);
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3;
+    ctx.roundRect(3, 3, 250, 74, 10);
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 30px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🤖 AGV 待命', 128, 40);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const labelMaterial = new THREE.SpriteMaterial({ map: texture });
+    agvLabel = new THREE.Sprite(labelMaterial);
+    agvLabel.position.set(0, 4.6, 0);
+    agvLabel.scale.set(5.5, 1.7, 1);
+    agv.add(agvLabel);
+}
+
+/** Rack half-width helper */
+function rackWidthHalf() {
+    return CONFIG.rack.boxesPerSide * CONFIG.rack.slotWidth / 2;
+}
+
+/**
+ * Update AGV status label text (both 3D sprite and HTML status card)
+ */
+function setAgvLabel(text) {
+    if (agv && agvLabel) {
+        const canvas = agvLabel.material.map.image;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'rgba(249, 115, 22, 0.95)';
+        ctx.roundRect(0, 0, 256, 80, 12);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.roundRect(3, 3, 250, 74, 10);
+        ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 26px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, 128, 40);
+        agvLabel.material.map.needsUpdate = true;
+    }
+
+    // Mirror the status in the HTML card (150ms throttle)
+    const statusCard = document.getElementById('agv-status');
+    if (statusCard) statusCard.textContent = text;
+}
+
+/**
  * Create floor pallets - enlarged 4x
  * 3 pallets placed on the right side of racks
  */
@@ -864,6 +1088,18 @@ function createFloorPallets() {
     zoneLabel.scale.set(8, 2.5, 1);  // Larger label for bigger pallets
     scene.add(zoneLabel);
     labels.push(zoneLabel);
+
+    // Register pallets as solid obstacles (AGV and worker cannot walk through them)
+    palletData.forEach((pd) => {
+        obstacles.push({
+            minX: pd.x - CONFIG.collision.palletHalfWidth,
+            maxX: pd.x + CONFIG.collision.palletHalfWidth,
+            minZ: pd.z - CONFIG.collision.palletHalfWidth,
+            maxZ: pd.z + CONFIG.collision.palletHalfWidth,
+            palletId: pd.id,
+        });
+        floorPallets[floorPallets.length - 1].obstacleRef = obstacles[obstacles.length - 1];
+    });
 }
 
 /**
@@ -895,6 +1131,7 @@ function searchBox(searchId) {
         createNavigationPath(matchingBox);
         focusOnBox(matchingBox);
         showBoxInfo(matchingBox);
+        agvDispatchToSlot(matchingBox);
         return { type: 'slot', ...matchingBox.userData };
     }
 
@@ -908,6 +1145,7 @@ function searchBox(searchId) {
         createNavigationPathToPallet(matchingPallet);
         focusOnPallet(matchingPallet);
         showPalletInfo(matchingPallet);
+        agvDispatchToPallet(matchingPallet);
         return { type: 'pallet', ...matchingPallet };
     }
 
@@ -923,6 +1161,7 @@ function searchBox(searchId) {
         createNavigationPath(matchingItemBox);
         focusOnBox(matchingItemBox);
         showBoxInfo(matchingItemBox);
+        agvDispatchToSlot(matchingItemBox);
         return { type: 'slot', searchedBy: 'item', ...matchingItemBox.userData };
     }
 
@@ -936,10 +1175,47 @@ function searchBox(searchId) {
         createNavigationPathToPallet(matchingItemPallet);
         focusOnPallet(matchingItemPallet);
         showPalletInfo(matchingItemPallet);
+        agvDispatchToPallet(matchingItemPallet);
         return { type: 'pallet', searchedBy: 'item', ...matchingItemPallet };
     }
 
     return null;
+}
+
+/**
+ * Dispatch the AGV to fetch a slot box and bring it in front of the worker.
+ */
+function agvDispatchToSlot(box) {
+    if (!agv) return;
+    agvReturnCargo();
+    const slot = box.userData;
+    agvSchedule({
+        kind: 'slot',
+        box: box,
+        label: `🤖 取 ${slot.boxId}`,
+        itemLabel: `${slot.boxId}${slot.item ? ' · ' + slot.item : ''}`,
+    });
+}
+
+/**
+ * Dispatch the AGV to fetch a floor pallet and bring it in front of the worker.
+ */
+function agvDispatchToPallet(pallet) {
+    if (!agv) return;
+    agvReturnCargo();
+    agvSchedule({
+        kind: 'pallet',
+        pallet: pallet,
+        label: `🤖 取 ${pallet.id}`,
+        itemLabel: `${pallet.id}${pallet.items ? ' · ' + pallet.items : ''}`,
+    });
+}
+
+/**
+ * Cancel any running job and restore the carried cargo to its previous position
+ */
+function agvResetJob() {
+    agvReturnCargo();
 }
 
 /**
@@ -954,6 +1230,467 @@ function highlightPallet(pallet) {
         pallet.stack.material.emissive = new THREE.Color(CONFIG.colors.highlight);
         pallet.stack.material.emissiveIntensity = 0.5;
     }
+}
+
+/* ==================== AGV path & mission logic ==================== */
+
+/**
+ * Check if a point (x, z) is inside any obstacle the AGV / worker must not cross.
+ * All registered obstacles (rack rows, occupied shelf cells, floor pallets) block both.
+ */
+function agvCheckCollision(x, z, isAgv = true) {
+    const pad = isAgv ? 0.7 : 0.9;   // AGV body / worker body clearance
+    for (const obs of obstacles) {
+        if (x > obs.minX - pad && x < obs.maxX + pad && z > obs.minZ - pad && z < obs.maxZ + pad) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Ground obstacle test used for the walking worker.
+ * Same registry as the AGV: racks, occupied shelf cells, floor pallets all block.
+ */
+function groundBlockedAt(x, z) {
+    const padWorker = 1.0;   // Worker body radius keeping clear of obstacles
+    for (const obs of obstacles) {
+        if (x > obs.minX - padWorker && x < obs.maxX + padWorker &&
+            z > obs.minZ - padWorker && z < obs.maxZ + padWorker) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Simple 2D grid A* planner on a coarse walkable grid.
+ * Returns an array of {x, z} waypoints (excluding the start point).
+ */
+function agvPlanPath(startX, startZ, goalX, goalZ, isAgv) {
+    const cell = 1.5;
+    const minX = -80, maxX = 80, minZ = -60, maxZ = 90;
+    const cols = Math.ceil((maxX - minX) / cell);
+    const rows = Math.ceil((maxZ - minZ) / cell);
+    const nodeIndex = (cx, rz) => rz * cols + cx;
+
+    const blocked = new Uint8Array(cols * rows);
+    for (let rz = 0; rz < rows; rz++) {
+        for (let cx = 0; cx < cols; cx++) {
+            const wx = minX + (cx + 0.5) * cell;
+            const wz = minZ + (rz + 0.5) * cell;
+            blocked[nodeIndex(cx, rz)] = agvCheckCollision(wx, wz, isAgv) ? 1 : 0;
+        }
+    }
+
+    const toCell = (wx, wz) => {
+        const cx = Math.min(cols - 1, Math.max(0, Math.floor((wx - minX) / cell)));
+        const rz = Math.min(rows - 1, Math.max(0, Math.floor((wz - minZ) / cell)));
+        return { cx, rz };
+    };
+
+    const startCell = toCell(startX, startZ);
+    const goalCell = toCell(goalX, goalZ);
+
+    // If start is blocked, nudge it to a nearby free cell
+    if (blocked[nodeIndex(startCell.cx, startCell.rz)]) {
+        const fix = findNearbyFreeCell(startCell.cx, startCell.rz, blocked, cols, rows);
+        if (fix) {
+            startCell.cx = fix.cx;
+            startCell.rz = fix.rz;
+        }
+    }
+
+    // A* search
+    const open = [{ cx: startCell.cx, rz: startCell.rz, g: 0, f: 0, parent: null }];
+    const seen = new Map();
+    seen.set(nodeIndex(startCell.cx, startCell.rz), open[0]);
+
+    let best = null;
+    let iter = 0;
+    while (open.length && iter < 6000) {
+        iter++;
+        open.sort((a, b) => a.f - b.f);
+        const cur = open.shift();
+
+        if (cur.cx === goalCell.cx && cur.rz === goalCell.rz) {
+            best = cur;
+            break;
+        }
+
+        // 8-connected neighbors with diagonal cost 1.414
+        for (let dz = -1; dz <= 1; dz++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dz === 0) continue;
+                const nx = cur.cx + dx;
+                const nz = cur.rz + dz;
+                if (nx < 0 || nx >= cols || nz < 0 || nz >= rows) continue;
+                if (blocked[nodeIndex(nx, nz)]) continue;
+                // Prevent diagonal corner cutting
+                if (dx !== 0 && dz !== 0) {
+                    if (blocked[nodeIndex(cur.cx + dx, cur.rz)] || blocked[nodeIndex(cur.cx, cur.rz + dz)]) continue;
+                }
+                const stepCost = (dx !== 0 && dz !== 0) ? 1.414 : 1;
+                const g = cur.g + stepCost;
+                const h = Math.hypot(goalCell.cx - nx, goalCell.rz - nz);
+                const key = nodeIndex(nx, nz);
+                if (seen.has(key) && seen.get(key).g <= g) continue;
+
+                const node = { cx: nx, rz: nz, g, f: g + h, parent: cur };
+                seen.set(key, node);
+                open.push(node);
+            }
+        }
+    }
+
+    if (!best) {
+        // Fall back to a straight line (allows the AGV to be visually blocked)
+        return [{ x: goalX, z: goalZ }];
+    }
+
+    // Backtrack
+    const cells = [];
+    let n = best;
+    while (n) {
+        cells.push({ x: minX + (n.cx + 0.5) * cell, z: minZ + (n.rz + 0.5) * cell });
+        n = n.parent;
+    }
+    cells.reverse();
+    cells.shift();   // Drop the start cell (AGV is already there)
+
+    // Append the exact goal point
+    cells.push({ x: goalX, z: goalZ });
+    return cells;
+}
+
+/**
+ * Breadth-first search outward to find the nearest cell that is not blocked
+ */
+function findNearbyFreeCell(cx, cz, blocked, cols, rows) {
+    const radius = 20;
+    for (let r = 1; r <= radius; r++) {
+        for (let dz = -r; dz <= r; dz++) {
+            for (let dx = -r; dx <= r; dx++) {
+                if (Math.abs(dx) !== r && Math.abs(dz) !== r) continue;
+                const nx = cx + dx;
+                const nz = cz + dz;
+                if (nx < 0 || nx >= cols || nz < 0 || nz >= rows) continue;
+                if (!blocked[nz * cols + nx]) return { cx: nx, rz: nz };
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Schedule the AGV to travel to the pallet/box and then to the worker.
+ * This sets up the job; the mission is executed in the animation loop.
+ */
+function agvSchedule(target) {
+    agvJob = {
+        stage: 'toCargo',
+        target,
+        plannedAt: Date.now(),
+    };
+    setAgvLabel(target.label);
+}
+
+/**
+ * Compute the meeting point in front of the worker (2.5m ahead of its facing)
+ */
+function agvMeetingPoint() {
+    const dist = 4;
+    return new THREE.Vector3(
+        workerMarker.position.x + Math.sin(workerYaw) * dist,
+        workerMarker.position.y,
+        workerMarker.position.z + Math.cos(workerYaw) * dist
+    );
+}
+
+/**
+ * Ensure the meeting point is not inside an obstacle: nudge outward
+ * along the worker's facing until free (or fallback to worker pos + offset)
+ */
+function agvSafeMeetingPoint() {
+    for (let dist = 4; dist <= 16; dist += 1) {
+        const p = new THREE.Vector3(
+            workerMarker.position.x + Math.sin(workerYaw) * dist,
+            0,
+            workerMarker.position.z + Math.cos(workerYaw) * dist
+        );
+        if (!agvCheckCollision(p.x, p.z, true)) return p;
+    }
+    // Fall back to just behind the worker
+    return new THREE.Vector3(workerMarker.position.x, 0, workerMarker.position.z - 4);
+}
+
+/**
+ * Update the AGV every frame: drive along plan, lift load, deliver to worker.
+ */
+function updateAGV(delta) {
+    if (!agv || !agvJob) {
+        // Idle bob for the beacon
+        if (agv) {
+            const beacon = agv.getObjectByName('agv-beacon');
+            if (beacon) beacon.material.emissiveIntensity = 0.35 + Math.sin(Date.now() * 0.006) * 0.3;
+        }
+        return;
+    }
+
+    const beacon = agv.getObjectByName('agv-beacon');
+    if (beacon) beacon.material.emissiveIntensity = 0.9 + Math.sin(Date.now() * 0.01) * 0.5;
+
+    // Re-plan path when start/goal change significantly or an obstacle moved
+    const now = Date.now();
+    if (!agvPath || agvPath.length === 0 || now - lastAgvObstacleCheck > 400) {
+        lastAgvObstacleCheck = now;
+        planAgvStage();
+    }
+
+    if (!agvPath || agvPath.length === 0) {
+        // Arrived at the current stage target
+        handleAgvArrival();
+    } else {
+        stepAgvAlongPath(delta);
+    }
+}
+
+/**
+ * (Re)plan the current stage of the AGV mission
+ */
+function planAgvStage() {
+    if (!agv || !agvJob) return;
+    if (checkpoint.cancelled) return;
+
+    const stage = agvJob.stage;
+    let goal = null;
+
+    if (stage === 'toCargo') {
+        goal = agvCargoApproachPos(agvJob.target);
+    } else if (stage === 'toWorker') {
+        // Only re-pick the meeting point while still far away so it doesn't jitter
+        if (!checkpoint.meeting || agv.position.distanceTo(workerMarker.position) > 10) {
+            checkpoint.meeting = agvSafeMeetingPoint();
+        }
+        goal = { x: checkpoint.meeting.x, z: checkpoint.meeting.z };
+    }
+
+    if (!goal) return;
+
+    const startX = agv.position.x;
+    const startZ = agv.position.z;
+
+    // If already at goal within a small tolerance, skip pathing
+    if (Math.hypot(startX - goal.x, startZ - goal.z) < 0.7) {
+        agvPath = [];
+        return;
+    }
+
+    agvPath = agvPlanPath(startX, startZ, goal.x, goal.z, true);
+    if (agvPath.length === 0 && Math.hypot(startX - goal.x, startZ - goal.z) > 0.7) {
+        agvPath = [{ x: goal.x, z: goal.z }];   // Fallback direct
+    }
+}
+
+/**
+ * Where the AGV should park to pick up the cargo
+ */
+function agvCargoApproachPos(target) {
+    if (target.kind === 'pallet') {
+        const p = target.pallet.group.position;
+        // Park to the west of the pallet, just clear of its obstacle AABB
+        const standoff = CONFIG.collision.palletHalfWidth + CONFIG.agv.bodyLength / 2 + 0.5;
+        return { x: p.x - standoff, z: p.z };
+    }
+    // Slot cargo: approach the shelf aisle in front of its side
+    const slot = target.box.userData;
+    const halfDepth = (CONFIG.rack.rackDepth - CONFIG.rack.centerGap) / 2;
+    const rowZ = getRackWorldZ(slot.row);
+    const aisleZ = slot.side === 0
+        ? rowZ - halfDepth - 3.2
+        : rowZ + halfDepth + 3.2;
+    // AGV sits at the slot X, in the aisle in front of the shelf
+    const x = (slot.position - (CONFIG.rack.boxesPerSide - 1) / 2) * CONFIG.rack.slotWidth;
+    return { x, z: aisleZ };
+}
+
+/**
+ * Move AGV toward the next waypoint
+ */
+function stepAgvAlongPath(delta) {
+    if (!agvPath || agvPath.length === 0) return;
+    const next = agvPath[0];
+    const dx = next.x - agv.position.x;
+    const dz = next.z - agv.position.z;
+    const dist = Math.hypot(dx, dz);
+
+    if (dist < 0.35) {
+        agvPath.shift();
+        return;
+    }
+
+    const dirX = dx / dist;
+    const dirZ = dz / dist;
+
+    // Face the movement direction (0 rotation = -Z facing front)
+    const targetYaw = Math.atan2(dirX, dirZ);
+    let deltaYaw = angleDelta(agv.rotation.y, targetYaw);
+    agv.rotation.y += THREE.MathUtils.clamp(deltaYaw, -CONFIG.agv.turnSpeed * delta, CONFIG.agv.turnSpeed * delta);
+
+    // Don't move forward until mostly facing the right way
+    if (Math.abs(deltaYaw) > 0.15) return;
+
+    const speed = CONFIG.agv.speed * (0.6 + 0.4 * Math.cos(deltaYaw));
+    const step = Math.min(dist, speed * delta);
+    // Collision check right before applying the step
+    const nx = agv.position.x + dirX * step;
+    const nz = agv.position.z + dirZ * step;
+    if (!agvCheckCollision(nx, nz, true)) {
+        agv.position.x = nx;
+        agv.position.z = nz;
+        agvLiftPulse(delta);
+    } else {
+        // Blocked: force a re-plan shortly
+        lastAgvObstacleCheck = 0;
+    }
+}
+
+/**
+ * Fork lift animation: beam (and tines, which are parented to the mast) rises
+ * while carrying, settles empty. The carried clone is positioned in updateCarriedCargo.
+ */
+function agvLiftPulse(delta) {
+    const fork = agv.getObjectByName('agv-fork');
+    if (!fork || !agvJob) return;
+    const targetY = agvCarried ? CONFIG.agv.liftHeight : 0.35;
+    fork.position.y += (targetY - fork.position.y) * Math.min(1, 4 * delta);
+    // Tines share the fork beam's height (they are siblings in the mast group)
+    const mast = agv.getObjectByName('agv-mast');
+    if (mast) {
+        mast.children.forEach((child) => {
+            if (child !== fork && child.geometry && child.geometry.parameters &&
+                child.geometry.parameters.height !== undefined && child.geometry.parameters.height < 0.3) {
+                child.position.y = fork.position.y - 0.1;
+            }
+        });
+    }
+}
+
+/**
+ * First time a stage completes: lift cargo / start the next stage
+ */
+function handleAgvArrival() {
+    if (!agvJob) return;
+
+    if (agvJob.stage === 'toCargo') {
+        const target = agvJob.target;
+        if (target.kind === 'pallet') {
+            // Palette: lift the stack mesh onto the AGV
+            const stack = target.pallet.stack;
+            stack.visible = false;
+            agvCarried = {
+                kind: 'pallet',
+                pallet: target.pallet,
+                mesh: stack,
+                originalParent: null,
+                originalPos: stack.position.clone(),
+                originalY: target.pallet.group.position.y,
+            };
+            checkpoint.cargoDescription = `${target.pallet.id} · ${target.pallet.items || ''}`;
+        } else {
+            // Slot box: hide the box mesh and hold it on the AGV
+            const boxMesh = target.box;
+            boxMesh.visible = false;
+            agvCarried = {
+                kind: 'slot',
+                box: boxMesh,
+                mesh: boxMesh,
+                originalPos: boxMesh.position.clone(),
+            };
+            const data = boxMesh.userData;
+            checkpoint.cargoDescription = `${data.boxId}${data.item ? ' · ' + data.item : ''}`;
+        }
+        setAgvLabel(`🤖 載送中 ${checkpoint.cargoDescription.split(' ')[0]}`);
+        agvJob.stage = 'toWorker';
+        agvPath = [];
+        // Move the carried load onto the fork
+        placeCarriedOnFork();
+    } else if (agvJob.stage === 'toWorker') {
+        setAgvLabel('🤖 已送達請查收');
+        agvJob.stage = 'idle';
+        agvJob.doneAt = Date.now();
+        // Keep the cargo displayed on the AGV fork until the next search
+        agvJob.holdCargo = true;
+    }
+}
+
+/**
+ * Show the carried mesh on the AGV fork
+ */
+function placeCarriedOnFork() {
+    if (!agvCarried) return;
+
+    if (agvCarried.kind === 'slot') {
+        // The box is a scene child; reparent to the AGV and pin it above the fork
+        const mesh = agvCarried.box;
+        agv.attach(mesh);
+        mesh.visible = true;
+        mesh.position.set(0, CONFIG.agv.liftHeight + CONFIG.box.height / 2, CONFIG.agv.bodyLength / 2 + CONFIG.agv.forkLength / 2 - 0.5);
+        mesh.rotation.set(0, 0, 0);
+        mesh.scale.set(1, 1, 1);
+    } else if (agvCarried.kind === 'pallet') {
+        // Keep the original stack in place but hide it, and show a clone on the fork
+        const stack = agvCarried.mesh;
+        stack.visible = false;
+        const cloneMesh = new THREE.Mesh(stack.geometry, stack.material);
+        cloneMesh.castShadow = true;
+        cloneMesh.name = 'agv-cargo-clone';
+        agv.add(cloneMesh);
+        agvCarried.cloneMesh = cloneMesh;
+        updateCarriedCargo();
+    }
+}
+
+/**
+ * Every frame: keep the carried load visually glued to the AGV fork
+ */
+function updateCarriedCargo() {
+    if (!agvCarried || !agvCarried.cloneMesh) return;
+    agvCarried.cloneMesh.position.set(
+        0,
+        CONFIG.agv.liftHeight,
+        CONFIG.agv.bodyLength / 2 + CONFIG.agv.forkLength / 2 - 0.5
+    );
+}
+
+/**
+ * Wipe job state and return the cargo to the shelf
+ */
+function agvReturnCargo() {
+    if (agvCarried) {
+        if (agvCarried.kind === 'slot') {
+            const mesh = agvCarried.box;
+            // Detach from the AGV back to the scene, restore original position
+            const world = new THREE.Vector3();
+            mesh.getWorldPosition(world);
+            scene.attach(mesh);
+            mesh.position.copy(agvCarried.originalPos);
+            mesh.visible = true;
+        } else if (agvCarried.kind === 'pallet') {
+            if (agvCarried.cloneMesh) {
+                agv.remove(agvCarried.cloneMesh);
+                // NOTE: geometry & material are shared with the original stack; don't dispose
+                agvCarried.cloneMesh = null;
+            }
+            agvCarried.pallet.stack.visible = true;
+        }
+    }
+    agvCarried = null;
+    agvJob = null;
+    agvPath = [];
+    checkpoint.meeting = null;
+    checkpoint.cancelled = false;
+    if (agv) setAgvLabel('🤖 AGV 待命');
 }
 
 /**
@@ -1284,14 +2021,18 @@ function focusOnBox(box) {
 /**
  * Show storage slot info in panel
  */
-function showBoxInfo(box) {
-    const data = box.userData;
+function showBoxInfo(boxOrSlot) {
+    const data = (boxOrSlot && boxOrSlot.userData) ? boxOrSlot.userData : boxOrSlot;
+
+    // Defensive: ignore clicks whose data isn't a real storage slot
+    if (!data || !data.boxId) return;
+
     const hasItem = data.item && data.item !== '-' && data.item !== '';
     const sideLabel = data.side === 0 ? 'A側' : 'B側';
 
-    document.getElementById('info-title').textContent = `� 儲位 ${data.boxId}`;
+    document.getElementById('info-title').textContent = `📦 儲位 ${data.boxId}`;
     document.getElementById('info-location').textContent = `${data.boxId} (${sideLabel})`;
-    document.getElementById('info-level').textContent = `第 ${data.level + 1} 層`;
+    document.getElementById('info-level').textContent = `第 ${(data.level || 0) + 1} 層`;
     document.getElementById('info-status').textContent = hasItem ? '✅ 有存放' : '⬜ 空置';
     document.getElementById('info-item').textContent = hasItem ? data.item : '(空位)';
 
@@ -1468,6 +2209,14 @@ function setupWorkerDrag() {
                 draggingObject.position.x = newPos.x + dragOffset.x;
                 draggingObject.position.z = newPos.z + dragOffset.z;
                 draggingObject.position.y = 0;
+                // Keep its collision AABB aligned while the user drags it
+                const record = floorPallets.find(p => p.group === draggingObject);
+                if (record && record.obstacleRef) {
+                    record.obstacleRef.minX = draggingObject.position.x - CONFIG.collision.palletHalfWidth;
+                    record.obstacleRef.maxX = draggingObject.position.x + CONFIG.collision.palletHalfWidth;
+                    record.obstacleRef.minZ = draggingObject.position.z - CONFIG.collision.palletHalfWidth;
+                    record.obstacleRef.maxZ = draggingObject.position.z + CONFIG.collision.palletHalfWidth;
+                }
             }
         }
     });
@@ -1598,7 +2347,24 @@ function updateWorkerMovement(delta) {
             .addScaledVector(rightVec, input.right * speed * delta);
         move.y = 0;
 
+        // Collision-aware: split the step so that the worker cannot walk
+        // through floor pallets nor dense shelf cells (only ground obstacles)
+        const oldPos = workerMarker.position.clone();
         workerMarker.position.add(move);
+        if (groundBlockedAt(workerMarker.position.x, workerMarker.position.z)) {
+            // try axis-separated fallback moves
+            const stepX = new THREE.Vector3(move.x, 0, 0);
+            const stepZ = new THREE.Vector3(0, 0, move.z);
+            const tryX = new THREE.Vector3(oldPos.x + stepX.x, 0, oldPos.z);
+            const tryZ = new THREE.Vector3(oldPos.x, 0, oldPos.z + stepZ.z);
+            if (!groundBlockedAt(tryX.x, tryX.z)) {
+                workerMarker.position.set(tryX.x, workerMarker.position.y, tryX.z);
+            } else if (!groundBlockedAt(tryZ.x, tryZ.z)) {
+                workerMarker.position.set(tryZ.x, workerMarker.position.y, tryZ.z);
+            } else {
+                workerMarker.position.copy(oldPos);
+            }
+        }
 
         // Turn toward walking direction (local +Z is the worker's front)
         const desiredYaw = Math.atan2(move.x, move.z);
@@ -1706,7 +2472,10 @@ function onMouseClick(event) {
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
     raycaster.setFromCamera(mouse, camera);
-    const intersects = raycaster.intersectObjects(boxes);
+    // Non-recursive: skip child objects (label sprites / edges) so the click
+    // always resolves to the slot box mesh itself
+    const intersects = raycaster.intersectObjects(boxes, false)
+        .filter(hit => hit.object && hit.object.userData && hit.object.userData.boxId);
 
     if (intersects.length > 0) {
         const selectedBox = intersects[0].object;
@@ -1795,6 +2564,10 @@ function animate() {
     // Keyboard worker movement + follow camera
     updateWorkerMovement(delta);
 
+    // AGV mission + carried cargo + reset idle jobs
+    updateAGV(delta);
+    updateCarriedCargo();
+
     // Animate worker marker ring
     if (workerMarker) {
         const ring = workerMarker.getObjectByName('worker-ring');
@@ -1804,7 +2577,7 @@ function animate() {
     }
 
     // Animate highlighted box
-    if (highlightedBox) {
+    if (highlightedBox && highlightedBox.visible && highlightedBox.parent === scene) {
         const time = Date.now() * 0.003;
         const scale = 1.1 + Math.sin(time) * 0.05;
         highlightedBox.scale.set(scale, scale, scale);
@@ -1840,6 +2613,7 @@ function animate() {
 window.searchBox = searchBox;
 window.clearHighlight = clearHighlight;
 window.clearNavigationArrows = clearNavigationArrows;
+window.agvReturnCargo = agvReturnCargo;
 
 // Initialize the scene
 init();

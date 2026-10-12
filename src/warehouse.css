@@ -333,6 +333,20 @@ body {
     font-size: 0.75rem;
 }
 
+/* AGV Status Card */
+.agv-status {
+    margin-top: 12px;
+    padding: 9px 12px;
+    background: linear-gradient(135deg, rgba(249, 115, 22, 0.22), rgba(251, 146, 60, 0.12));
+    border: 1px solid rgba(249, 115, 22, 0.45);
+    border-radius: 8px;
+    text-align: center;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #fdba74;
+    letter-spacing: 0.3px;
+}
+
 /* Info Panel */
 #info-panel {
     position: fixed;
@@ -407,57 +421,6 @@ body {
 .info-row span:last-child {
     font-weight: 600;
     color: var(--text-primary);
-}
-
-/* Legend */
-#legend {
-    position: fixed;
-    bottom: 20px;
-    left: 20px;
-    background: var(--glass-bg);
-    backdrop-filter: blur(20px);
-    border: 1px solid var(--glass-border);
-    border-radius: 12px;
-    padding: 16px;
-    z-index: 100;
-}
-
-#legend h4 {
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 12px;
-}
-
-.legend-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-    font-size: 0.9rem;
-}
-
-.legend-item:last-child {
-    margin-bottom: 0;
-}
-
-.color-box {
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-}
-
-.color-box.occupied {
-    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-}
-
-.color-box.available {
-    background: linear-gradient(135deg, #22c55e, #16a34a);
-}
-
-.color-box.reserved {
-    background: linear-gradient(135deg, #f59e0b, #d97706);
 }
 
 /* Stats Display */
