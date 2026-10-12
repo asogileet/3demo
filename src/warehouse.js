@@ -64,6 +64,19 @@ let dragPlane = null;         // Plane for raycasting during drag
 let floorMesh = null;         // Reference to floor for raycasting
 let floorPallets = [];        // Floor pallets storage
 
+// Keyboard control + follow camera state
+const keys = new Set();                    // Currently held keys (KeyboardEvent.code)
+let cameraFollow = false;                  // Follow camera enabled
+let followZoom = 16;                       // Follow camera distance (mouse wheel adjustable)
+let cameraFollowYaw = Math.PI;             // Follow camera orbit angle around the worker
+const followCamPos = new THREE.Vector3();  // Smoothed camera position while following
+const followCamLook = new THREE.Vector3(); // Smoothed look-at point while following
+let workerYaw = 0;                         // Worker facing angle (radians)
+let bobPhase = 0;                          // Head-bob phase while walking
+let bobAmp = 0;                            // Head-bob amount 0..1 (fades in/out)
+let lastPathRecalc = 0;                    // Last navigation-arrow recompute (ms)
+let clock = null;                          // THREE.Clock for per-frame delta time
+
 // DOM Elements
 const loadingScreen = document.getElementById('loading-screen');
 const progressFill = document.getElementById('progress-fill');
@@ -660,6 +673,15 @@ function createWorkerMarker() {
     head.position.y = 2.3;
     workerMarker.add(head);
 
+    // Add nose cone to make facing direction visible when walking
+    const nose = new THREE.Mesh(
+        new THREE.ConeGeometry(0.25, 0.7, 12),
+        new THREE.MeshStandardMaterial({ color: 0xe8590c, roughness: 0.5 })
+    );
+    nose.rotation.x = Math.PI / 2;
+    nose.position.set(0, 2.3, 1.1);
+    workerMarker.add(nose);
+
     // Add base ring indicator
     const ringGeometry = new THREE.RingGeometry(1.8, 2.5, 32);
     const ringMaterial = new THREE.MeshBasicMaterial({
@@ -693,7 +715,7 @@ function createWorkerMarker() {
     ctx.font = 'bold 28px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('🧑 拖曳我設定起點', 128, 40);
+    ctx.fillText('🧑 WASD 移動 · F 視角跟隨', 128, 40);
 
     const texture = new THREE.CanvasTexture(canvas);
     const labelMaterial = new THREE.SpriteMaterial({ map: texture });
@@ -1349,8 +1371,9 @@ function setupEventListeners() {
         });
     }
 
-    // Worker marker drag functionality
+    // Worker marker drag functionality + keyboard control
     setupWorkerDrag();
+    initKeyboardControl();
 }
 
 /**
@@ -1452,7 +1475,7 @@ function setupWorkerDrag() {
     renderer.domElement.addEventListener('mouseup', () => {
         if (isDraggingWorker && draggingObject) {
             isDraggingWorker = false;
-            controls.enabled = true;
+            if (!cameraFollow) controls.enabled = true;   // Stay off during follow mode
             renderer.domElement.style.cursor = 'default';
 
             if (draggingType === 'worker') {
@@ -1474,7 +1497,7 @@ function setupWorkerDrag() {
     renderer.domElement.addEventListener('mouseleave', () => {
         if (isDraggingWorker && draggingObject) {
             isDraggingWorker = false;
-            controls.enabled = true;
+            if (!cameraFollow) controls.enabled = true;   // Stay off during follow mode
             renderer.domElement.style.cursor = 'default';
 
             if (draggingType === 'worker') {
@@ -1487,6 +1510,183 @@ function setupWorkerDrag() {
             draggingType = null;
         }
     });
+}
+
+/* ==================== Keyboard movement + follow camera ==================== */
+
+/** Shortest signed angle from a to b, in (-PI, PI] */
+function angleDelta(a, b) {
+    let d = (b - a) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d <= -Math.PI) d += Math.PI * 2;
+    return d;
+}
+
+/**
+ * Toggle follow camera on/off (F key or checkbox)
+ */
+function setCameraFollow(enabled) {
+    cameraFollow = !!enabled;
+    const followToggle = document.getElementById('toggle-follow');
+    if (followToggle) followToggle.checked = cameraFollow;
+
+    // Seed follow state from wherever the camera currently is (no snap on toggle)
+    const offset = camera.position.clone().sub(workerMarker.position);
+
+    if (cameraFollow) {
+        controls.enabled = false;             // OrbitControls off while following
+        followCamPos.copy(camera.position);   // Continue from the current view
+        followCamLook.copy(controls.target);
+        cameraFollowYaw = Math.atan2(-offset.x, -offset.z);
+        followZoom = THREE.MathUtils.clamp(camera.position.distanceTo(workerMarker.position), 8, 40);
+        if (highlightedBox) {                 // Camera will move away -> reroute arrows later
+            clearNavigationArrows();
+            createNavigationPath(highlightedBox);
+        }
+    } else {
+        controls.enabled = true;
+        // Hand the orbit rig over to the worker, viewed from behind
+        const back = new THREE.Vector3(
+            -Math.sin(cameraFollowYaw), 0.55, -Math.cos(cameraFollowYaw)
+        ).multiplyScalar(followZoom);
+        controls.target.copy(workerMarker.position);
+        camera.position.copy(workerMarker.position).add(back);
+    }
+    updateFollowHint();
+}
+
+/**
+ * Sync follow-camera checkbox/label with state
+ */
+function updateFollowHint() {
+    const hint = document.getElementById('follow-hint');
+    if (hint) hint.textContent = cameraFollow ? '鏡頭跟隨中：滾輪=距離 Q/E=環繞' : '按 F 或勾選跟隨鏡頭';
+}
+
+/**
+ * Movement input: WASD + arrow keys; Shift = 快速移動
+ */
+function readMoveInput() {
+    const forward = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) -
+        (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
+    const right = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) -
+        (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+    return { forward, right, sprint: keys.has('ShiftLeft') || keys.has('ShiftRight') };
+}
+
+/**
+ * Per-frame worker movement + follow-camera update
+ * Movement is screen-relative: W = away from camera, A/D = left/right
+ */
+function updateWorkerMovement(delta) {
+    if (!workerMarker || isDraggingWorker) return;
+
+    const input = readMoveInput();
+    const moving = input.forward !== 0 || input.right !== 0;
+
+    if (moving) {
+        // Camera forward projected onto the floor plane
+        const forwardVec = camera.getWorldDirection(new THREE.Vector3());
+        forwardVec.y = 0;
+        if (forwardVec.lengthSq() < 1e-6) forwardVec.set(0, 0, 1);
+        forwardVec.normalize();
+        const rightVec = new THREE.Vector3(-forwardVec.z, 0, forwardVec.x);
+
+        const speed = input.sprint ? 22 : 10;
+        const move = new THREE.Vector3()
+            .addScaledVector(forwardVec, input.forward * speed * delta)
+            .addScaledVector(rightVec, input.right * speed * delta);
+        move.y = 0;
+
+        workerMarker.position.add(move);
+
+        // Turn toward walking direction (local +Z is the worker's front)
+        const desiredYaw = Math.atan2(move.x, move.z);
+        workerYaw += angleDelta(workerYaw, desiredYaw) * Math.min(1, 12 * delta);
+        workerMarker.rotation.y = workerYaw;
+
+        // Walking animation: bounce + squash-stretch
+        bobPhase += delta * (6 + speed * 0.35);
+        bobAmp = Math.min(1, bobAmp + delta * 5);
+        const hop = Math.abs(Math.sin(bobPhase)) * bobAmp;
+        workerMarker.position.y = 1.5 - hop * 0.35;
+        workerMarker.scale.set(1 + bobAmp * 0.04 * Math.sin(bobPhase * 2), 1 - bobAmp * 0.06 * Math.sin(bobPhase * 2), 1 + bobAmp * 0.04 * Math.sin(bobPhase * 2));
+        workerMarker.rotation.z = bobAmp * 0.04 * Math.sin(bobPhase);   // Slight sway
+    } else {
+        // Idle: ease back to rest
+        bobAmp = Math.max(0, bobAmp - delta * 6);
+        workerMarker.position.y = 1.5;
+        workerMarker.scale.set(1, 1, 1);
+        workerMarker.rotation.z = 0;
+    }
+
+    // Follow camera: behind the worker, wheel = distance, Q/E = orbit around
+    if (cameraFollow) {
+        const rotSpeed = 2.2;
+        if (keys.has('KeyQ')) cameraFollowYaw += rotSpeed * delta;
+        if (keys.has('KeyE')) cameraFollowYaw -= rotSpeed * delta;
+        const desiredPos = new THREE.Vector3(
+            workerMarker.position.x - Math.sin(cameraFollowYaw) * followZoom,
+            workerMarker.position.y + followZoom * 0.55,
+            workerMarker.position.z - Math.cos(cameraFollowYaw) * followZoom
+        );
+        const desiredLook = new THREE.Vector3(
+            workerMarker.position.x,
+            workerMarker.position.y + 2.2,
+            workerMarker.position.z
+        );
+        const smooth = 1 - Math.exp(-10 * delta);       // Frame-rate-independent smoothing
+        followCamPos.lerp(desiredPos, smooth);
+        followCamLook.lerp(desiredLook, smooth);
+        camera.position.copy(followCamPos);
+        camera.lookAt(followCamLook);
+    }
+}
+
+/**
+ * Initialize keyboard/follow camera listeners
+ */
+function initKeyboardControl() {
+    if (!clock) clock = new THREE.Clock();
+
+    const onKeyDown = (e) => {
+        if (isTypingTarget(e)) return;          // Don't hijack typing in the search box
+        if (e.code.startsWith('Arrow')) e.preventDefault();   // Keep the page from scrolling
+        if (e.code === 'KeyF' && !e.repeat) {
+            setCameraFollow(!cameraFollow);
+            e.preventDefault();
+        } else {
+            keys.add(e.code);
+        }
+    };
+    const onKeyUp = (e) => keys.delete(e.code);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', () => keys.clear());   // Avoid stuck keys
+
+    // Mouse wheel adjusts the follow-camera distance while following
+    renderer.domElement.addEventListener('wheel', (e) => {
+        if (!cameraFollow) return;    // OrbitControls handles zoom otherwise
+        followZoom = THREE.MathUtils.clamp(followZoom + Math.sign(e.deltaY) * 1.5, 8, 40);
+        e.preventDefault();
+    }, { passive: false });
+
+    const followToggle = document.getElementById('toggle-follow');
+    if (followToggle) {
+        followToggle.addEventListener('change', (e) => setCameraFollow(e.target.checked));
+    }
+
+    updateFollowHint();
+}
+
+/**
+ * True when focus is in an input/textarea/contenteditable - don't intercept typing
+ */
+function isTypingTarget(e) {
+    const el = e.target;
+    if (!el || el === document.body) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
 }
 
 /**
@@ -1555,8 +1755,11 @@ function setViewAngle(view) {
 
 /**
  * Animate camera to target position
+ * When follow mode is on, this disables follow (search/view jumps are free-camera moves)
  */
 function animateCamera(targetPosition, targetLookAt) {
+    if (cameraFollow) setCameraFollow(false);
+
     const startPosition = camera.position.clone();
     const startLookAt = controls.target.clone();
     let progress = 0;
@@ -1586,6 +1789,12 @@ function animateCamera(targetPosition, targetLookAt) {
 function animate() {
     requestAnimationFrame(animate);
 
+    // Per-frame delta for smooth movement (clamped to avoid huge jumps after tab switch)
+    const delta = clock ? Math.min(clock.getDelta(), 0.05) : 0.016;
+
+    // Keyboard worker movement + follow camera
+    updateWorkerMovement(delta);
+
     // Animate worker marker ring
     if (workerMarker) {
         const ring = workerMarker.getObjectByName('worker-ring');
@@ -1606,15 +1815,24 @@ function animate() {
         }
     }
 
-    // Animate navigation arrows pulsing
+    // Animate navigation arrows pulsing + live-recompute the route as the worker moves
     navigationArrows.forEach((arrow, index) => {
         const time = Date.now() * 0.005 + index * 0.5;
         if (arrow.material) {
             arrow.material.opacity = 0.6 + Math.sin(time) * 0.3;
         }
     });
+    if (highlightedBox) {
+        const now = Date.now();
+        if (now - lastPathRecalc > 800) {
+            lastPathRecalc = now;
+            clearNavigationArrows();
+            createNavigationPath(highlightedBox);
+        }
+    }
 
-    controls.update();
+    // OrbitControls should not fight the follow camera
+    if (!cameraFollow) controls.update();
     renderer.render(scene, camera);
 }
 

@@ -52,6 +52,11 @@
         <div class="control-section">
             <h3>顯示選項</h3>
             <label class="toggle">
+                <input type="checkbox" id="toggle-follow" />
+                <span>跟隨鏡頭 (F)</span>
+            </label>
+            <div id="follow-hint" class="search-hint"></div>
+            <label class="toggle">
                 <input type="checkbox" id="toggle-labels" checked />
                 <span>顯示標籤</span>
             </label>
@@ -67,6 +72,10 @@
         <div class="control-section">
             <h3>操作說明</h3>
             <ul class="instructions-list">
+                <li>⌨️ WASD／方向鍵：移動人偶</li>
+                <li>⌨️ Shift：快速移動</li>
+                <li>⌨️ F：開關跟隨鏡頭</li>
+                <li>⌨️ 跟隨中：滾輪=距離 Q/E=環繞人偶</li>
                 <li>🖱️ 左鍵拖曳：旋轉視角</li>
                 <li>🖱️ 右鍵拖曳：平移</li>
                 <li>🖱️ 滾輪：縮放</li>
