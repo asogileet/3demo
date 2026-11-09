@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="溪畔微景 - 寫實溪流微景模型，可旋轉視角並撥動水面產生漣漪" />
+  <title>溪畔微景 | Creekside Miniature</title>
+  <link rel="stylesheet" href="/src/creek.css" />
+</head>
+
+<body>
+  <!-- Loading Screen -->
+  <div id="loading-screen">
+    <div class="loader">
+      <div class="spinner"></div>
+      <p>生成溪床與水流中…</p>
+    </div>
+  </div>
+
+  <header class="title">
+    <h1>溪 畔 微 景</h1>
+    <p>CREEKSIDE MINIATURE</p>
+  </header>
+  <a class="back" href="index.html">← 返回首頁</a>
+
+  <!-- Control Panel -->
+  <div class="panel">
+    <h2>環境設定</h2>
+    <label class="row"><span>水流速度</span><input type="range" id="flow-speed" min="0" max="200" value="100" /></label>
+    <label class="row"><span>太陽角度</span><input type="range" id="sun-angle" min="8" max="80" value="42" /></label>
+    <label class="row"><span>微風強度</span><input type="range" id="wind-strength" min="0" max="100" value="35" /></label>
+    <label class="row"><span>自動旋轉</span><input type="checkbox" id="auto-rotate" /></label>
+    <button id="reset-view" class="btn">重設視角</button>
+  </div>
+
+  <div class="hint">拖曳旋轉視角 · 滾輪縮放 · 在水面點擊或拖曳撥動水波</div>
+
+  <!-- Canvas Container -->
+  <div id="canvas-container"></div>
+
+  <script type="module" src="/src/creek/main.js"></script>
+</body>
+
+</html>
